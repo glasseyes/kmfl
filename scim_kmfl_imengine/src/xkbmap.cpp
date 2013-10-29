@@ -1,27 +1,3 @@
-/*
- * KMFL Input Method for SCIM (Smart Common Input Method)
- *
- * Copyright (C) 2005 SIL International
- * based on source from SCIM Copyright (c) 2004 James Su <suzhe@tsinghua.org.cn>
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
- *
- */
-
-#include <stdio.h>
-#include <stdlib.h>
 #include <iostream>
 #include <iomanip>
 #include <list>
@@ -204,10 +180,8 @@ char * Xkbmap::stringFromOptions(char *orig)
 		newoptions+= *i;
 	}
 	if (orig) {
-		orig= (char*)realloc(orig, newoptions.length() + 1);
-		
-		if (orig)
-			strcpy(orig, newoptions.c_str());
+		realloc(orig, newoptions.length() + 1);
+		strcpy(orig, newoptions.c_str());
 	} else {
 		orig=strdup(newoptions.c_str());
 	}
@@ -306,7 +280,7 @@ Bool Xkbmap::applyRules(void)
 
 /* Primitive sanity check - filter out 'map names' (inside parenthesis) */
 /* that can confuse xkbcomp parser */
-Bool Xkbmap::checkName(char *name, const char* str)
+Bool Xkbmap::checkName(char *name, char* str)
 {
    char *i = name, *opar = NULL;
    Bool ret = True;

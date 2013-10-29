@@ -1,24 +1,3 @@
-/* kmfl_interpreter.c
- * Copyright (C) 2005 SIL International and Tavultesoft Pty Ltd
- *
- * This file is part of the KMFL library.
- *
- * The KMFL library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * The KMFL library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with the KMFL library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
- *
- */
-
 /*
 
 	Keystroke interpreter for keyboard mapping for Linux project
@@ -51,9 +30,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <kmfl/kmfl.h>
-#include <kmfl/kmflutfconv.h>
-#include "libkmfl.h"
+#include "kmfl.h"
+#include "ConvertUTF.h"
 
 // Macros to find index offsets and referenced stores or groups
 #define INDEX_OFFSET(x)		(((x)>>16)&0xff)
@@ -70,9 +48,6 @@ int process_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys);
 UINT modified_state(UINT state);
 UINT compare_state(ITEM rule_key, ITEM keystroke);
 
-void erase_char_int(KMSI *p_kmsi);
-void queue_item_for_output(KMSI *p_kmsi, ITEM item);
-void process_output_queue(KMSI *p_kmsi);
 void output_item(void *connection, ITEM x);
 void add_to_history(KMSI *p_kmsi,ITEM key);
 void delete_from_history(KMSI *p_kmsi,UINT nchars);
@@ -85,8 +60,6 @@ UINT store_length(KMSI *p_kmsi, UINT nstore);
 void output_string(void *connection, char *p);
 void output_char(void *connection, BYTE q);
 void output_beep(void *connection);
-void forward_keyevent(void *connection, UINT key, UINT state);
-
 void erase_char(void *connection);
 
 int kmfl_interpret(KMSI *p_kmsi, UINT key, UINT state) 
@@ -96,8 +69,6 @@ int kmfl_interpret(KMSI *p_kmsi, UINT key, UINT state)
 	ITEM keysym;
 	int matched;
 
-	p_kmsi->noutput_queue=0;
-	
 	// Test first for modifier key keystrokes and do nothing
 	switch(key) 
 	{
@@ -120,6 +91,12 @@ int kmfl_interpret(KMSI *p_kmsi, UINT key, UINT state)
 	// Pack the state bits into a single byte
 	state = modified_state(state);
 
+	// For ANSI characters, clear Shift flag unless control or alt is set (already encoded in keysym)
+	if(((key&0xff00) == 0) && (key > 0x20) && ((state & 0xcc) == 0)) state &= ~0x11;
+	// Note that this prevents LShift/RShift from being correctly processed.
+	// In order to handle that distinction, it will be necessary to add full treatment
+	// of locale-dependent input. To be done later.
+
 	// Get the memory address of the keyboard header
 	p_kbd = p_kmsi->keyboard;
 	p_group1 = p_kmsi->groups+p_kbd->group1;
@@ -130,12 +107,8 @@ int kmfl_interpret(KMSI *p_kmsi, UINT key, UINT state)
 	p_kmsi->history[0] = keysym;
 
 	// Pass control to the first group for processing, and return if key was matched
-	if(process_group(p_kmsi, p_group1) > 0) 
-	{
-		process_output_queue(p_kmsi);
-		return 1;
-	}
-	
+	if((matched=process_group(p_kmsi, p_group1)) > 0) return 1;
+
 	/* need some kind of error notification if error value returned */
 
 	// If the keystroke is a valid Unicode character, and not a control or alt combination, 
@@ -143,8 +116,7 @@ int kmfl_interpret(KMSI *p_kmsi, UINT key, UINT state)
 	if(((key & 0xff00) == 0) && ((state & 0xcc) == 0))
 	{
 		add_to_history(p_kmsi,(ITEM)key);
-		queue_item_for_output(p_kmsi,(ITEM)key);
-		process_output_queue(p_kmsi);
+		output_item(p_kmsi->connection,(ITEM)key);
 		return 1;
 	}
 
@@ -154,91 +126,63 @@ int kmfl_interpret(KMSI *p_kmsi, UINT key, UINT state)
 
 	case 0xff08:		// backspace - erase last character from history
 		delete_from_history(p_kmsi,1);
-		erase_char_int(p_kmsi);
+		erase_char(p_kmsi->connection);
 		return 1;
 	case 0xff09:		// tab - clear history, let app handle key
 	case 0xff0d:		// return - clear history, let app handle key
 		clear_history(p_kmsi);
 		return 0;
-	case 0xff1b:		// escape - add to history, let app handle key
+	case 0xff1b:		// escape - add to history, and output ANSI Escape
 		add_to_history(p_kmsi,(ITEM)0x1b);
-		return 0;
+		output_char(p_kmsi->connection,(ITEM)0x1b);
+		return 1;
 	default:
 		clear_history(p_kmsi);
 		return 0;		// let application handle key, but erase history 
 	}
 }
 
-int search_for_match(KMSI *p_kmsi, XGROUP *gp, XRULE **rp, ITEM * any_index, int usekeys)
+// Process a keystroke with a given group of rules
+int process_group(KMSI *p_kmsi, XGROUP *gp) 
 {
 	UINT nrules, n, nhistory;
-	int matched=0;
-	DBGMSG(1, "DAR: search_for_match\n");
-	
-	if(p_kmsi->nhistory > MAX_HISTORY) 
-		p_kmsi->nhistory = MAX_HISTORY;
-	
+	XRULE *rp, trule;
+	ITEM any_index[MAX_HISTORY+2];
+	int matched, result=0, usekeys, enable_global_matching;
+
+	if(p_kmsi->nhistory > MAX_HISTORY) p_kmsi->nhistory = MAX_HISTORY;
+	usekeys = ((gp->flags & GF_USEKEYS) != 0);
 	nhistory = p_kmsi->nhistory;
-	
-	if(usekeys) 
-		nhistory++;
-		
+	if(usekeys) nhistory++;
 	p_kmsi->history[nhistory+1-usekeys] = 0;
 
 	nrules = gp->nrules;
 
 	// Match rules until either a match is found or all rules have been tried
-	for(n=0,*rp=p_kmsi->rules+gp->rule1; n<nrules; n++,(*rp)++) 
+	for(n=0,rp=p_kmsi->rules+gp->rule1; n<nrules; n++,rp++) 
 	{
 		// Check rule length before matching
-		if(((*rp)->ilen > nhistory+1) || (((*rp)->ilen == nhistory+1)
-			&& (ITEM_TYPE(*(p_kmsi->strings+(*rp)->lhs)) != ITEM_NUL))) continue;
+		if((rp->ilen > nhistory+1) || ((rp->ilen == nhistory+1)
+			&& (ITEM_TYPE(*(p_kmsi->strings+rp->lhs)) != ITEM_NUL))) continue;
 
 		// Compare the current rule with the history
-		if((matched=match_rule(p_kmsi,*rp,any_index,usekeys)))
+		if((matched=match_rule(p_kmsi,rp,any_index,usekeys)))
+		{			
+			// Then determine the output for this rule
+			result = process_rule(p_kmsi,rp,any_index,usekeys);
 			break;
-	}
-	
-	return matched;
-}
-
-// Process a keystroke with a given group of rules
-int process_group(KMSI *p_kmsi, XGROUP *gp) 
-{
-	XRULE *rp, trule;
-	ITEM any_index[MAX_HISTORY+2];
-	int matched, result=0, usekeys, enable_global_matching;
-	
-	DBGMSG(1, "DAR: process_group\n");
-
-	usekeys = ((gp->flags & GF_USEKEYS) != 0);
-	
-	matched=search_for_match(p_kmsi, gp, &rp, any_index, usekeys);
-	
-	if (!matched)
-	{
-		DBGMSG(1, "DAR: process_group not matched\n");
-		// Now try without shift state
-		if ((p_kmsi->history[0] & (KS_SHIFT<<16)) != 0) 
-		{
-			p_kmsi->history[0] &= ~((unsigned long)KS_SHIFT<<16);
-			matched=search_for_match(p_kmsi, gp, &rp, any_index, usekeys);
 		}
 	}
-	
-	DBGMSG(1, "DAR: process_group 2\n");
-
-	if (matched)
-		// Then determine the output for this rule
-		result = process_rule(p_kmsi,rp,any_index,usekeys);
-
-	DBGMSG(1, "DAR: process_group 3\n");
 
 	// Determine if we need to consider processing match or nomatch rules
 	if((gp->flags & GF_USEKEYS) != 0)
+	{
 		enable_global_matching = ((*p_kmsi->history & 0xff00) != 0xff00);
+	}
 	else
+	{
 		enable_global_matching = 1;
+	}
 
 	// Conditionally process nomatch and match rules here, if result = 0 or 1 respectively
 	if((result == 0) && (gp->nmrlen > 0) && enable_global_matching)
@@ -253,7 +197,8 @@ int process_group(KMSI *p_kmsi, XGROUP *gp)
 		trule.ilen = 0;
 		trule.olen = gp->mrlen;
 		trule.rhs = gp->match;
-		process_rule(p_kmsi,&trule,any_index,usekeys);
+		result = process_rule(p_kmsi,&trule,any_index,usekeys);
+		if(result == 0) result = 1;		// matched already, do not return 0 
 	}
 
 	return result;
@@ -263,7 +208,7 @@ int process_group(KMSI *p_kmsi, XGROUP *gp)
 int match_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys) 
 {
 	
-	UINT k, m, n, nmax, rulelen, nhistory, index;
+	UINT k, m, n, nmax, rulelen, nhistory;
 	ITEM *pr, *ph, *ps, mask;
 
 	rulelen = rp->ilen;
@@ -273,9 +218,7 @@ int match_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys)
 	
 	for(m=0; m<rp->ilen; pr++,ph--,m++) 
 	{
-		unsigned char item_type;
-		item_type=ITEM_TYPE(*pr);
-		switch(item_type) 
+		switch(ITEM_TYPE(*pr)) 
 		{
 		case ITEM_CHAR:
 			if(*pr != *ph) return 0;
@@ -291,38 +234,23 @@ int match_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys)
 			break;				// matched - continue matching string
 
 		case ITEM_ANY:	// will need to allow for matching keysyms in any()
-		case ITEM_NOTANY: 
 			ps = store_content(p_kmsi,STORE_NUMBER(*pr));
 			nmax = store_length(p_kmsi,STORE_NUMBER(*pr));
-
+			if(m == rp->ilen-1) mask = 0xffffff; else mask = 0xffffffff;
 			for(n=0; n<nmax; ps++,n++) 
 			{
-				if(((*ps)  & 0xffff) == ((*ph)& 0xffff)) 
+				if(((*ps) & mask) == ((*ph) & mask)) // ignore keysym id
 				{
-					if (compare_state(*ps,*ph) == 0)
-					{
-						any_index[m] = n;	// save offset for use with index
-						break;
-					}
+					any_index[m] = n;	// save offset for use with index
+					break;
 				}
 			}
-			if (item_type == ITEM_ANY) {
-				if(n == nmax) return 0;		// no match
-			} else {
-				if(n != nmax) return 0;		// no match
-			}
+			if(n == nmax) return 0;		// no match
 			break;				// matched - continue matching string
 
 		case ITEM_INDEX:		// indexes start from 1, not 0
-			index= any_index[INDEX_OFFSET(*pr)-1];
-			if (index >= store_length(p_kmsi,STORE_NUMBER(*pr)))
-			{
-				ERRMSG("\"any index\" out of range\n");
-				return 0;
-			} else {
-				ps = store_content(p_kmsi,STORE_NUMBER(*pr));
-				if(*pr != *(ps + any_index[INDEX_OFFSET(*pr)-1])) return 0;	
-			}
+			ps = store_content(p_kmsi,STORE_NUMBER(*pr));
+			if(*pr != *(ps + any_index[INDEX_OFFSET(*pr)-1])) return 0;	
 			break;				// matched - continue matching string
 
 
@@ -363,7 +291,7 @@ int match_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys)
 int process_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys) 
 {
 	XGROUP *gp;
-	UINT i, k, m, n, nout, itp, index;
+	UINT i, k, m, n, nout, itp;
 	ITEM *p, *pr, *ps, output[MAX_OUTPUT+1], history[MAX_HISTORY], *it;
 	int erase, result, retCode=1, nhistory;
 
@@ -390,10 +318,8 @@ int process_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys)
 		case ITEM_NOMATCH:
 			break;
 		default:
-			if(ITEM_TYPE(p_kmsi->history[1]) != ITEM_DEADKEY) 
-				erase_char_int(p_kmsi);	
-			for(i=1; i<p_kmsi->nhistory; i++) 
-				p_kmsi->history[i] = p_kmsi->history[i+1];
+			if(itp != ITEM_DEADKEY) erase_char(p_kmsi->connection);	
+			for(i=1; i<p_kmsi->nhistory; i++) p_kmsi->history[i] = p_kmsi->history[i+1];
 			p_kmsi->nhistory--;
 			break;
 		}
@@ -409,21 +335,14 @@ int process_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys)
 			break;
 
 		case ITEM_INDEX:	// note that indexes start from 1, not 0
-			index= any_index[INDEX_OFFSET(*pr)-1];
-			if (index >= store_length(p_kmsi,STORE_NUMBER(*pr)))
+			ps = store_content(p_kmsi,STORE_NUMBER(*pr));
+			it=ps + any_index[INDEX_OFFSET(*pr)-1];
+			if (ITEM_TYPE(*it) == ITEM_BEEP)
 			{
-				ERRMSG("\"any index\" out of range\n");
-				return -1;
+	                        DBGMSG(1, "DAR -libkmfl - *** index beep*** \n");
+        	                output_beep(p_kmsi->connection);
 			} else {
-				ps = store_content(p_kmsi,STORE_NUMBER(*pr));
-				it=ps + index;
-				if (ITEM_TYPE(*it) == ITEM_BEEP)
-				{
-	                        	DBGMSG(1, "DAR -libkmfl - *** index beep*** \n");
-        	                	output_beep(p_kmsi->connection);
-				} else {
-					*p++ = *it;
-				}
+				*p++ = *it;
 			}
 			
 			break;
@@ -471,20 +390,21 @@ int process_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys)
 			if(retCode == 2) break;	// do not process subgroup rules if return encountered
 			
 			gp = p_kmsi->groups+GROUP_NUMBER(*pr);
-			if((retCode=process_group(p_kmsi,gp)) < 0) 
+			if((result=process_group(p_kmsi,gp)) < 0) 
 			{
 				return -1;	// error processing subgroup rules
+			}
+			else if(result == 2)
+			{
+				retCode = 2;// return in subgroup: finish this rule, then exit
 			}
 			break;			
 
 		case ITEM_CALL:		// not implemented, but not illegal
 			break;
 
-		case ITEM_KEYSYM:	
-			*p++ = *pr;
-			break;
-
-//		case ITEM_ANY: // should be prevented by compiler
+//		case ITEM_KEYSYM:	// should be prevented by compiler
+//		case ITEM_ANY:
 //		case ITEM_MATCH:
 //		case ITEM_NOMATCH:
 //			return (-1);		
@@ -499,27 +419,8 @@ int process_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys)
 		// Then output the output string (excepting deadkeys), and add it to the history
 		for(n=0, p=output; n<nout; n++, p++) 
 		{	
-			if(ITEM_TYPE(*p) == ITEM_DEADKEY) 
-			{
-                add_to_history(p_kmsi,*p);
-			}
-			else
-			{
-	            if (ITEM_TYPE(*p) == ITEM_KEYSYM)
-                {
-					UINT key, state;
-					key = (*p) & 0xFFFF;
-					state = ((*p) >> 16) & 0xFF;
-					DBGMSG(1, "DAR - libkmfl - ITEM_KEYSYM key:%x, state: %x\n", key, state);
-                    forward_keyevent(p_kmsi->connection, key, state);
-                    clear_history(p_kmsi);
-                } 
-                else
-                {
-                	queue_item_for_output(p_kmsi,*p);
-                	add_to_history(p_kmsi,*p);
-               	}
-            }
+			if(ITEM_TYPE(*p) != ITEM_DEADKEY) output_item(p_kmsi->connection,*p);
+			add_to_history(p_kmsi,*p);
 		}
 
 		// Reset pointer and continue
@@ -527,33 +428,6 @@ int process_rule(KMSI *p_kmsi, XRULE *rp, ITEM *any_index, int usekeys)
 	}
 
 	return retCode;	// Return 1 (or 2) to indicate that the keystroke has been matched and processed
-}
-
-// Check to see if there are deadkeys in the current history
-int deadkey_in_history(KMSI *p_kmsi)
-{
-	ITEM * pitem =p_kmsi->history+1;
-	UINT nitems= p_kmsi->nhistory;
-	UINT iitem;
-
-	for (iitem=0; iitem < nitems; iitem++, pitem++) {
-		if(ITEM_TYPE(*pitem) == ITEM_DEADKEY) {
-			return 1; 
-		}
-	}
-
-	return 0;
-}
-
-// Sets the history to the surrounding context 
-void set_history(KMSI *p_kmsi, ITEM * items, UINT nitems)
-{
-
-	if (nitems > MAX_HISTORY)
-		nitems = MAX_HISTORY;
-
-	memcpy(p_kmsi->history+1, items, nitems * sizeof(ITEM));
-	p_kmsi->nhistory=nitems;
 }
 
 // Add a character item (or deadkey) to the start of the history stack (to item 1)
@@ -576,11 +450,9 @@ void delete_from_history(KMSI *p_kmsi,UINT nitems)
 {
 	UINT nleft;
 
-	if(p_kmsi->nhistory > MAX_HISTORY) 
-		p_kmsi->nhistory = MAX_HISTORY;
+	if(p_kmsi->nhistory > MAX_HISTORY) p_kmsi->nhistory = MAX_HISTORY;
 
-	if(nitems > p_kmsi->nhistory) 
-		nitems = p_kmsi->nhistory;
+	if(nitems > p_kmsi->nhistory) nitems = p_kmsi->nhistory;
 	nleft = p_kmsi->nhistory - nitems;
 	if(nleft > 0 && nitems > 0)
 	{
@@ -596,77 +468,17 @@ void clear_history(KMSI *p_kmsi)
 	p_kmsi->nhistory = 0;
 }
 
-// a single key event we queue items for output. If the keyboard needs to delete a 
-// character, this queue is checked first and characters are deleted first from
-// here. If this queue is empty, then characters are delete from the application
-// This avoids cases such <BS><BS><C1><BS><C2><C3> where <C1> <C2> and <C3> are
-// characters and <BS> is a backspace. What the application will see is 
-// OB<BS><BS><C2><C3>
-void queue_item_for_output(KMSI *p_kmsi, ITEM item)
-{
-	if (p_kmsi->noutput_queue < MAX_OUTPUT) 
-	{
-		p_kmsi->output_queue[p_kmsi->noutput_queue]= item;
-		(p_kmsi->noutput_queue)++;
-	} else {
-		ERRMSG("Exceeded maximum length of output allowed from any one key event.\n");
-	}
-}
-
-void process_output_queue(KMSI *p_kmsi)
-{
-	int i;
-	
-	UTF32 utfin[2]={0};
-	UTF32 *pin;
-	UTF8 utfout[MAX_OUTPUT*4+1]={0};
-	UTF8 *pout;
-	size_t result;
-	
-	pout = &utfout[0];
-	for (i=0; i < p_kmsi->noutput_queue; i++) {
-#if 0
-		output_item(p_kmsi->connection, p_kmsi->output_queue[i]);
-#else
-		pin = &utfin[0]; 
-		utfin[0] = p_kmsi->output_queue[i]; 
-		result = IConvertUTF32toUTF8((const UTF32 **)&pin,utfin+1,&pout,utfout+MAX_OUTPUT*4);
-		if (result == (size_t)-1) {
-			ERRMSG("Exceeded maximum length of output allowed from any one key event.\n");
-			return;
-		}
-	}
-	*pout = 0;
-	output_string(p_kmsi->connection, (char *)utfout);
-#endif
-}
-
-void erase_char_int(KMSI *p_kmsi)
-{
-	if (p_kmsi->noutput_queue > 0)
-		(p_kmsi->noutput_queue)--;
-	else
-		erase_char(p_kmsi->connection);
-}
-
-// Because some apps cannot handle a mixture of erases and commits when processing
 // Output a Unicode character (as a multi-byte string)
 void output_item(void *connection, ITEM x)
 {
 	UTF32 utfin[2]={0}, *pin;
 	UTF8 utfout[16]={0}, *pout;
-	size_t result;
-	utfin[0] = x; 
-	pin = &utfin[0]; 
-	pout = &utfout[0];
+	ConversionResult result;
+	utfin[0] = x; pin = &utfin[0]; pout = &utfout[0];
 
-	result = IConvertUTF32toUTF8((const UTF32 **)&pin,utfin+1,&pout,utfout+15);
-	
-	if (result != (size_t)-1)
-	{
-		*pout = 0;
-		output_string(connection, (char *)utfout);
-	}
+	result = ConvertUTF32toUTF8((const UTF32 **)&pin,utfin+1,&pout,utfout+15, 0);
+	*pout = 0;
+	output_string(connection, utfout);
 }
 
 // Return the address of the referenced store
@@ -764,6 +576,6 @@ int kmfl_get_header(KMSI *p_kmsi,int hdrID,char *buf,int buflen)
 	if(nitems == 0) return -4;
 	
 	memset(buf,0,buflen);
-	return IConvertUTF32toUTF8((const UTF32**)&p32,p32+nitems,&p8,p8+buflen-1);
+	return ConvertUTF32toUTF8(&p32,p32+nitems,&p8,p8+buflen-1,0);
 }
 

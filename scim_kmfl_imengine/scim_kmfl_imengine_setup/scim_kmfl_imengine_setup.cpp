@@ -3,46 +3,43 @@
  */
 
 /*
- * KMFL Input Method for SCIM (Smart Common Input Method)
+ * KMFL Input Method
  *
- * Copyright (C) 2005 SIL International
- * based on source from SCIM Copyright (c) 2004 James Su <suzhe@tsinghua.org.cn>
+ * Copyright (c) 2004 Doug Rintoul <doug_rintoul@sil.org>
+ * 
  *
  * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
+ * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * version 2 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this program; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place, Suite 330,
+ * Boston, MA  02111-1307  USA
+ *
  *
  */
  
 #define Uses_SCIM_CONFIG_BASE
 
-
-#include <string.h>
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <gtk/gtk.h>
-#include <kmfl/kmfl.h>
-#include <kmfl/libkmfl.h>
+#include <libkmfl/kmfl.h>
 #include <fstream>
 #include <errno.h>
-#include <setjmp.h>
-#include <kmfl/kmflcomp.h>
-#include <kmfl/kmflutfconv.h>
-#include "kmfl_private.h"
-#include <scim.h>
-#include <gtk/scimkeyselection.h>
+#include "scim_private.h"
+#include "scim.h"
+#include "gtk/scimkeyselection.h"
+#include "ConvertUTF.h"
 
 using namespace scim;
 
@@ -141,8 +138,7 @@ struct KeyboardPropertiesData {
     String author;
     String icon;
     String locales;
-    String copyright;
-    String message;
+    String status_prompt;
 };
 
 // Internal data declaration.
@@ -155,7 +151,6 @@ static GtkListStore *__widget_keyboard_list_model = 0;
 
 static GtkWidget *__widget_keyboard_install_button = 0;
 static GtkWidget *__widget_keyboard_delete_button = 0;
-static GtkWidget *__widget_keyboard_properties_button = 0;
 
 static KeyboardConfigData __config_keyboards[] = {
     {
@@ -196,8 +191,15 @@ static KeyboardConfigData __config_keyboards[] = {
 static void on_default_editable_changed(GtkEditable * editable,
 					gpointer user_data);
 
+static void on_default_toggle_button_toggled(GtkToggleButton *
+					     togglebutton,
+					     gpointer user_data);
+
 static void on_default_key_selection_clicked(GtkButton * button,
 					     gpointer user_data);
+
+static void on_icon_file_selection_clicked(GtkButton * button,
+					   gpointer user_data);
 
 static void on_keyboard_list_selection_changed(GtkTreeSelection *
 					       selection,
@@ -212,13 +214,22 @@ static void on_keyboard_delete_clicked(GtkButton * button,
 static void on_keyboard_properties_clicked(GtkButton * button,
 					   gpointer user_data);
 
+static void on_toggle_button_toggled(GtkToggleButton * button,
+				     gpointer user_data);
+
 static gint run_keyboard_properties_dialog(XKEYBOARD * keyboard,
 					   KeyboardPropertiesData & data,
 					   bool editable);
 
+static bool validate_keyboard_properties_data(const XKEYBOARD * keyboard,
+					      const KeyboardPropertiesData
+					      & data);
+
 static GdkPixbuf *scale_pixbuf(GdkPixbuf ** pixbuf, int width, int height);
 
 static void setup_widget_value();
+
+static GtkWidget *create_keyboard_page();
 
 static GtkWidget *create_kmfl_management_page();
 
@@ -239,51 +250,10 @@ static bool test_file_modify(const String & file);
 
 static bool test_file_unlink(const String & file);
 
-static void show_restart_hint()
-{
-    GtkWidget *dialog;
-
-    dialog = gtk_message_dialog_new (NULL,
-                            GTK_DIALOG_MODAL,
-                            GTK_MESSAGE_INFO,
-                            GTK_BUTTONS_OK,
-                            _("Please restart any applications currently "
-                              "using KMFL for your changes to take effect."));
-
-    gtk_dialog_run (GTK_DIALOG (dialog));
-
-    gtk_widget_destroy (dialog);
-}
-
 static void restart_scim()
 {
-    FILE *in;
-    char buff[512];
-
-    if (!(in = popen("scim-config-agent -c global -g /DefaultConfigModule", "r"))) 
-    {
-        return;
-    }
-
-    /* read the output to get the default config module */
-    if (fgets(buff, sizeof(buff), in) != NULL) 
-    {
-    		int result;
-
-		String defaultconfigmodule(buff);
-		
-		defaultconfigmodule=defaultconfigmodule.substr(0, defaultconfigmodule.length()-1);
-		
-		String command("/usr/lib/scim-1.0/scim-launcher -d -c " + defaultconfigmodule + " -e all -f socket --no-stay");
-		
-		String pkill("pkill -f \""+command+"\"");
-
-		result=system(pkill.c_str());
-		result=system(command.c_str());	
-		show_restart_hint();
-	}
-	
-    pclose(in);    
+    system("killall scim-launcher");
+    system("scim -d");
 }
 
 // from scim_utility.cpp since scim-0.8.0 does not have scim_make_dir
@@ -309,6 +279,68 @@ make_dir (const String &dir)
     return true;
 }
 
+static GtkWidget *create_keyboard_page()
+{
+    GtkWidget *table;
+    GtkWidget *label;
+
+    int i;
+
+    table = gtk_table_new(3, 3, FALSE);
+    gtk_widget_show(table);
+
+    // Create keyboard setting.
+    for (i = 0; __config_keyboards[i].key; ++i) {
+	label = gtk_label_new(NULL);
+	gtk_label_set_text_with_mnemonic(GTK_LABEL(label),
+					 _(__config_keyboards[i].label));
+	gtk_widget_show(label);
+	gtk_misc_set_alignment(GTK_MISC(label), 1.0, 0.5);
+	gtk_misc_set_padding(GTK_MISC(label), 4, 0);
+	gtk_table_attach(GTK_TABLE(table), label, 0, 1, i, i + 1,
+			 (GtkAttachOptions) (GTK_FILL),
+			 (GtkAttachOptions) (GTK_FILL), 4, 4);
+
+	__config_keyboards[i].entry = gtk_entry_new();
+	gtk_widget_show(__config_keyboards[i].entry);
+	gtk_table_attach(GTK_TABLE(table),
+			 __config_keyboards[i].entry, 1, 2, i, i + 1,
+			 (GtkAttachOptions) (GTK_FILL | GTK_EXPAND),
+			 (GtkAttachOptions) (GTK_FILL), 4, 4);
+	gtk_entry_set_editable(GTK_ENTRY
+			       (__config_keyboards[i].entry), FALSE);
+
+	__config_keyboards[i].button = gtk_button_new_with_label("...");
+	gtk_widget_show(__config_keyboards[i].button);
+	gtk_table_attach(GTK_TABLE(table),
+			 __config_keyboards[i].button, 2, 3, i,
+			 i + 1, (GtkAttachOptions) (GTK_FILL),
+			 (GtkAttachOptions) (GTK_FILL), 4, 4);
+	gtk_label_set_mnemonic_widget(GTK_LABEL(label),
+				      __config_keyboards[i].button);
+    }
+
+    for (i = 0; __config_keyboards[i].key; ++i) {
+	g_signal_connect((gpointer) __config_keyboards[i].button,
+			 "clicked",
+			 G_CALLBACK
+			 (on_default_key_selection_clicked),
+			 &(__config_keyboards[i]));
+	g_signal_connect((gpointer) __config_keyboards[i].entry,
+			 "changed",
+			 G_CALLBACK(on_default_editable_changed),
+			 &(__config_keyboards[i].data));
+    }
+
+    for (i = 0; __config_keyboards[i].key; ++i) {
+	gtk_tooltips_set_tip(__widget_tooltips,
+			     __config_keyboards[i].entry,
+			     _(__config_keyboards[i].tooltip), NULL);
+    }
+
+    return table;
+}
+
 static GtkListStore *create_kmfl_list_model()
 {
     GtkListStore *model;
@@ -330,7 +362,7 @@ static GtkWidget *create_kmfl_management_page()
     GtkWidget *hbox;
     GtkWidget *button;
     GtkCellRenderer *renderer;
-    GtkTreeViewColumn *column, *namecolumn;
+    GtkTreeViewColumn *column;
     GtkTreeSelection *selection;
 
     page = gtk_vbox_new(FALSE, 0);
@@ -370,7 +402,7 @@ static GtkWidget *create_kmfl_management_page()
 		      __widget_keyboard_list_view);
 
     // Create name column
-    namecolumn = column = gtk_tree_view_column_new();
+    column = gtk_tree_view_column_new();
     gtk_tree_view_column_set_reorderable(column, TRUE);
     gtk_tree_view_column_set_sizing(column,
 				    GTK_TREE_VIEW_COLUMN_GROW_ONLY);
@@ -452,7 +484,6 @@ static GtkWidget *create_kmfl_management_page()
 		     G_CALLBACK(on_keyboard_install_clicked), 0);
     __widget_keyboard_install_button = button;
 
-
     button = gtk_button_new_with_mnemonic(_("_Delete"));
     gtk_widget_show(button);
     gtk_box_pack_start(GTK_BOX(vbox), button, FALSE, FALSE, 0);
@@ -462,7 +493,7 @@ static GtkWidget *create_kmfl_management_page()
     g_signal_connect(G_OBJECT(button), "clicked",
 		     G_CALLBACK(on_keyboard_delete_clicked), 0);
     __widget_keyboard_delete_button = button;
-
+#ifdef SUPPORT_PROPETIES
     button = gtk_button_new_with_mnemonic(_("_Properties"));
     gtk_widget_show(button);
     gtk_box_pack_start(GTK_BOX(vbox), button, FALSE, FALSE, 0);
@@ -473,8 +504,7 @@ static GtkWidget *create_kmfl_management_page()
     g_signal_connect(G_OBJECT(button), "clicked",
 		     G_CALLBACK(on_keyboard_properties_clicked), 0);
     __widget_keyboard_properties_button = button;
-
-    gtk_tree_view_column_clicked (namecolumn);
+#endif
     return page;
 }
 
@@ -600,6 +630,18 @@ on_default_editable_changed(GtkEditable * editable, gpointer user_data)
 }
 
 static void
+on_default_toggle_button_toggled(GtkToggleButton *
+				 togglebutton, gpointer user_data)
+{
+    bool *toggle = static_cast < bool * >(user_data);
+
+    if (toggle) {
+	*toggle = gtk_toggle_button_get_active(togglebutton);
+	__have_changed = true;
+    }
+}
+
+static void
 on_default_key_selection_clicked(GtkButton * button, gpointer user_data)
 {
     KeyboardConfigData *data =
@@ -630,6 +672,31 @@ on_default_key_selection_clicked(GtkButton * button, gpointer user_data)
 	}
 
 	gtk_widget_destroy(dialog);
+    }
+}
+
+static void
+on_icon_file_selection_clicked(GtkButton * button, gpointer user_data)
+{
+    GtkEntry *entry = static_cast < GtkEntry * >(user_data);
+
+    if (entry) {
+	GtkWidget *file_selection =
+	    gtk_file_selection_new(_("Select an icon file"));
+	gtk_file_selection_set_filename(GTK_FILE_SELECTION
+					(file_selection),
+					gtk_entry_get_text(entry));
+	gtk_file_selection_hide_fileop_buttons(GTK_FILE_SELECTION
+					       (file_selection));
+
+	gint result = gtk_dialog_run(GTK_DIALOG(file_selection));
+
+	if (result == GTK_RESPONSE_OK)
+	    gtk_entry_set_text(entry,
+			       gtk_file_selection_get_filename
+			       (GTK_FILE_SELECTION(file_selection)));
+
+	gtk_widget_destroy(file_selection);
     }
 }
 
@@ -691,10 +758,9 @@ get_keyboard_list(std::vector < String > &keyboard_list,
 	    stat(absfn.c_str(), &filestat);
 
 	    if (S_ISREG(filestat.st_mode)
-		&& ((absfn.substr(absfn.length() - 5,
+		&& absfn.substr(absfn.length() - 5,
 				5) == ".kmfl"
-		&& kmfl_check_keyboard(absfn.c_str()) == 0)
-		|| absfn.substr(absfn.length() - 4, 4) == ".kmn")) {
+		&& kmfl_check_keyboard(absfn.c_str()) == 0) {
 		keyboard_list.push_back(absfn);
             }
 
@@ -748,69 +814,41 @@ load_kmfl_file(const String & file)
     char version_string[6] = { 0 };
     struct stat fstat;
     FILE *fp;
-    const char * extension;
-    int errcode;
-    
-    extension = strrchr(file.c_str(), '.');
-   
-    if (extension && (strcmp(extension, ".kmn") == 0))
-    {
 
-       errcode = setjmp(fatal_error_buf);
-
-        if (errcode == 0)
-        {
-	    compile_keyboard_to_buffer(file.c_str(), (void **) &keyboard);
-	    memcpy(version_string,keyboard->version,3); // Copy to ensure terminated
-            kbver = (unsigned)atoi(version_string);
-	}
-	else
-	{
+    if (file.length()) {
+	// Get the file size
+	if (stat(file.c_str(), &fstat) != 0) {
 	    return NULL;
+        }
+        
+	filelen = fstat.st_size;
+
+	// Allocate memory for the installed keyboard
+	if ((keyboard = (XKEYBOARD *) malloc(filelen)) == NULL) {
+	    return NULL;
+        }
+
+	// Open the file
+	if ((fp = fopen(file.c_str(), "rb")) != NULL) {
+	    fread(keyboard, 1, filelen, fp);
+	    fclose(fp);
+	    memcpy(version_string, keyboard->version, 3);	// Copy to ensure terminated
+	    kbver = (unsigned) atoi(version_string);
 	}
-    }
-    else
-    {
-	if (file.length()) {
-	    // Get the file size
-	    if (stat(file.c_str(), &fstat) != 0) {
-		return NULL;
-	    }
-	    
-	    filelen = fstat.st_size;
-    
-	    // Allocate memory for the installed keyboard
-	    if ((keyboard = (XKEYBOARD *) malloc(filelen)) == NULL) {
-		return NULL;
-	    }
-    
-	    // Open the file
-	    if ((fp = fopen(file.c_str(), "rb")) != NULL) {
-		if (fread(keyboard, 1, filelen, fp)> 0) {
-			memcpy(version_string, keyboard->version, 3);	// Copy to ensure terminated
-			kbver = (unsigned) atoi(version_string);
-			fclose(fp);
-		} else {
-			fclose(fp);
-			free(keyboard);
-			return NULL;
-		}
-	    }
-	    // Check the loaded file is valid and has the correct version
-	    if ((memcmp(keyboard->id, "KMFL", 4) != 0)
-		|| (keyboard->version[3] != *FILE_VERSION)
-		|| (kbver < (unsigned) atoi(BASE_VERSION))
-		|| (kbver > (unsigned) atoi(LAST_VERSION))) {
-		free(keyboard);
-		return NULL;
-	    }
+	// Check the loaded file is valid and has the correct version
+	if ((memcmp(keyboard->id, "KMFL", 4) != 0)
+	    || (keyboard->version[3] != *FILE_VERSION)
+	    || (kbver < (unsigned) atoi(BASE_VERSION))
+	    || (kbver > (unsigned) atoi(LAST_VERSION))) {
+	    free(keyboard);
+	    return 0;
 	}
     }
     return keyboard;
 }
 
 static String
-get_static_store(XKEYBOARD * p_kbd, int hdrID)
+get_icon_name(XKEYBOARD * p_kbd)
 {
     XSTORE *stores;
     XGROUP *groups, *gp;
@@ -819,8 +857,8 @@ get_static_store(XKEYBOARD * p_kbd, int hdrID)
     UTF32 *p32;
     UTF8 *p8;
     unsigned int n, nrules;
-    static char static_store[256];
-    *static_store = 0;
+    static char icon_name[256];
+    *icon_name = 0;
 
     if (p_kbd != NULL) {
 	stores = (XSTORE *) (p_kbd + 1);
@@ -834,41 +872,16 @@ get_static_store(XKEYBOARD * p_kbd, int hdrID)
 	strings = (ITEM *) (rules + nrules);
 
 	if (stores[SS_BITMAP].len >= 0) {
-	    p32 = strings + stores[hdrID].items;
-	    p8 = (UTF8 *) static_store;
-	    IConvertUTF32toUTF8((const UTF32 **) &p32,
-			       p32 + stores[hdrID].len, &p8,
-			       p8 + 255);
+	    p32 = strings + stores[SS_BITMAP].items;
+	    p8 = (UTF8 *) icon_name;
+	    ConvertUTF32toUTF8((const UTF32 **) &p32,
+			       p32 + stores[SS_BITMAP].len, &p8,
+			       p8 + 255, strictConversion);
 	    *p8 = 0;
 	}
     }
     
-    return String(static_store);    
-}
-
-static String
-get_icon_name(XKEYBOARD * p_kbd)
-{
-    return get_static_store(p_kbd, SS_BITMAP);
-}
-
-static String
-find_real_icon_file(String icon_file_template)
-{
-    static String valid_extensions[3]= {"", ".bmp", ".png"};
-    String test_path;
-    struct stat filestat;
-    
-    for (int i=0; i < 3; i++)
-    {
-        test_path=icon_file_template+valid_extensions[i];
-        stat(test_path.c_str(), &filestat);
-
-        if (S_ISREG(filestat.st_mode))
-            return test_path;
-    }
-     
-    return String("");        
+    return String(icon_name);    
 }
 
 static String
@@ -877,26 +890,21 @@ get_icon_file(String icon_name, bool user)
     String icon_file;
 
     if (icon_name.length() == 0) {
-        return String(
-            SCIM_KMFL_SYSTEM_KEYBOARDS_DIR SCIM_PATH_DELIM_STRING
-            "icons" SCIM_PATH_DELIM_STRING "default.png");
+	icon_file =
+	    SCIM_KMFL_SYSTEM_KEYBOARDS_DIR SCIM_PATH_DELIM_STRING
+	    "icons" SCIM_PATH_DELIM_STRING "default.png";
     } else if (user) {
-        icon_file =
-            scim_get_home_dir() +
-            SCIM_KMFL_USER_KEYBOARDS_DIR SCIM_PATH_DELIM_STRING
-            "icons" SCIM_PATH_DELIM_STRING + icon_name;
+	icon_file =
+	    scim_get_home_dir() +
+	    SCIM_KMFL_USER_KEYBOARDS_DIR SCIM_PATH_DELIM_STRING
+	    "icons" SCIM_PATH_DELIM_STRING + icon_name;
     } else {
-        icon_file =
-            SCIM_KMFL_SYSTEM_KEYBOARDS_DIR SCIM_PATH_DELIM_STRING
-            "icons" SCIM_PATH_DELIM_STRING + icon_name;
+	icon_file =
+	    SCIM_KMFL_SYSTEM_KEYBOARDS_DIR SCIM_PATH_DELIM_STRING
+	    "icons" SCIM_PATH_DELIM_STRING + icon_name;
     }
+    
     return icon_file;
-}
-
-static String
-get_existing_icon_file(String icon_name, bool user)
-{
-    return find_real_icon_file(get_icon_file(icon_name, user));    
 }
 
 static void
@@ -913,8 +921,10 @@ add_keyboard_to_list(XKEYBOARD * keyboard, const String & dir,
     GdkPixbuf *pixbuf;
     gchar *name;
     
-    String icon_file=get_existing_icon_file(get_icon_name(keyboard), user);
+    String icon_file=get_icon_file(get_icon_name(keyboard), user);
     
+    fprintf(stderr, "DAR: loading icon file %s\n", icon_file.c_str());
+
     pixbuf = gdk_pixbuf_new_from_file(icon_file.c_str(), NULL);
 
     scale_pixbuf(&pixbuf, LIST_ICON_SIZE, LIST_ICON_SIZE);
@@ -1104,7 +1114,6 @@ on_keyboard_install_clicked(GtkButton * button, gpointer user_data)
 {
     GtkWidget *file_selection;
     GtkWidget *msg;
-    GtkFileFilter *filter;
     GtkTreeIter iter;
     String file;
     String new_file;
@@ -1118,34 +1127,21 @@ on_keyboard_install_clicked(GtkButton * button, gpointer user_data)
     String usr_dir(scim_get_home_dir() + SCIM_KMFL_USER_KEYBOARDS_DIR);
 
     // Select the keyboard file.
-    file_selection = gtk_file_chooser_dialog_new ("Please select the keyboard file to be installed.",
-				      NULL,
-				      GTK_FILE_CHOOSER_ACTION_OPEN,
-				      GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
-				      GTK_STOCK_OPEN, GTK_RESPONSE_ACCEPT,
-				      NULL);
+    file_selection =
+	gtk_file_selection_new(_
+			       ("Please select the keyboard file to be installed."));
+    gtk_file_selection_hide_fileop_buttons(GTK_FILE_SELECTION
+					   (file_selection));
 
-    filter = gtk_file_filter_new ();
-    gtk_file_filter_set_name (filter, _("Keyboard Files"));
-    gtk_file_filter_add_pattern (filter, "*.kmn");
-    gtk_file_filter_add_pattern (filter, "*.kmfl");
-    gtk_file_chooser_add_filter (GTK_FILE_CHOOSER (file_selection), filter);
+    result = gtk_dialog_run(GTK_DIALOG(file_selection));
 
-    filter = gtk_file_filter_new ();
-    gtk_file_filter_set_name (filter, _("All Files"));
-    gtk_file_filter_add_pattern (filter, "*");
-    gtk_file_chooser_add_filter (GTK_FILE_CHOOSER (file_selection), filter);
-
-    if (gtk_dialog_run (GTK_DIALOG (file_selection)) == GTK_RESPONSE_ACCEPT)
-    {
-        char * filename;
-        filename = gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (file_selection));
-        file = String(filename);
-        g_free (filename);
-    } else {    
-    	gtk_widget_destroy(file_selection);
-    	return;
+    if (result != GTK_RESPONSE_OK) {
+	gtk_widget_destroy(file_selection);
+	return;
     }
+
+    file = String(gtk_file_selection_get_filename
+		  (GTK_FILE_SELECTION(file_selection)));
 
     gtk_widget_destroy(file_selection);
 
@@ -1158,7 +1154,7 @@ on_keyboard_install_clicked(GtkButton * button, gpointer user_data)
 	path = file.substr(0, pos);
 	if (!path.length()) {
 	    path = SCIM_PATH_DELIM_STRING;
-    }
+        }
 
 	if (path == sys_dir || path == usr_dir) {
 	    msg = gtk_message_dialog_new(0, GTK_DIALOG_MODAL,
@@ -1189,6 +1185,8 @@ on_keyboard_install_clicked(GtkButton * button, gpointer user_data)
 	gtk_widget_destroy(msg);
 	return;
     }
+
+    fprintf(stderr, "DAR: Checking for %s\n", keyboard->name);
 
     // Find if there is a keyboard with same name was already installed.
     if (find_keyboard_in_list_by_xkeyboard(keyboard, &iter)) {
@@ -1278,57 +1276,39 @@ on_keyboard_install_clicked(GtkButton * button, gpointer user_data)
 				  (__widget_keyboard_list_model), &iter);
     }
 
-    if (!make_dir(path+SCIM_PATH_DELIM_STRING+"icons")) {
-        msg = gtk_message_dialog_new(0, GTK_DIALOG_MODAL,
-                         GTK_MESSAGE_ERROR,
-                         GTK_BUTTONS_CLOSE,
-                         _
-                         ("Failed to install the table to %s!"),
-                         new_file.c_str());
-        gtk_dialog_run(GTK_DIALOG(msg));
-        gtk_widget_destroy(msg);
+    if (!make_dir(path) && !make_dir(path+SCIM_PATH_DELIM_STRING+"icons")) {
+	msg = gtk_message_dialog_new(0, GTK_DIALOG_MODAL,
+				     GTK_MESSAGE_ERROR,
+				     GTK_BUTTONS_CLOSE,
+				     _
+				     ("Failed to install the table to %s!"),
+				     new_file.c_str());
+	gtk_dialog_run(GTK_DIALOG(msg));
+	gtk_widget_destroy(msg);
 
-        free(keyboard);
-        return;
+	free(keyboard);
+	return;
     }
 
     if (filecopy(file, new_file)) {
-        String full_icon_path;
-        String icon_name;       
-
         // let try for the icon file
-        icon_name = get_icon_name(keyboard);
-        full_icon_path=find_real_icon_file(get_dirname(file)+SCIM_PATH_DELIM_STRING+icon_name);
-
-        if (full_icon_path.length() == 0)
-        {
-            msg = gtk_message_dialog_new(0, GTK_DIALOG_MODAL,
-                             GTK_MESSAGE_WARNING,
-                             GTK_BUTTONS_CLOSE,
-                             _
-                             ("No icon file found for keyboard %s!"),
-                             file.c_str());
-            gtk_dialog_run(GTK_DIALOG(msg));
-            gtk_widget_destroy(msg);
-        } else {
-            String destdir = scim_get_home_dir() + SCIM_KMFL_USER_KEYBOARDS_DIR + SCIM_PATH_DELIM_STRING + "icons" + SCIM_PATH_DELIM_STRING;
-            String cmd = "cp " + full_icon_path + " " + destdir;
-            system(cmd.c_str());
-        }
-        add_keyboard_to_list(keyboard, path, new_file, user_keyboard);
+        String icon_name = get_icon_name(keyboard);
+        filecopy(get_dirname(file)+SCIM_PATH_DELIM_STRING+icon_name, 
+                 get_icon_file(icon_name, user_keyboard));
+	add_keyboard_to_list(keyboard, path, new_file, user_keyboard);
         restart_scim();
     } else {
-        msg = gtk_message_dialog_new(0, GTK_DIALOG_MODAL,
-                         GTK_MESSAGE_ERROR,
-                         GTK_BUTTONS_CLOSE,
-                         _
-                         ("Failed to install the keyboard %s!"),
-                         file.c_str());
-        gtk_dialog_run(GTK_DIALOG(msg));
-        gtk_widget_destroy(msg);
+	msg = gtk_message_dialog_new(0, GTK_DIALOG_MODAL,
+				     GTK_MESSAGE_ERROR,
+				     GTK_BUTTONS_CLOSE,
+				     _
+				     ("Failed to install the keyboard %s!"),
+				     file.c_str());
+	gtk_dialog_run(GTK_DIALOG(msg));
+	gtk_widget_destroy(msg);
 
-        free(keyboard);
-        return;
+	free(keyboard);
+	return;
     }
 }
 
@@ -1391,21 +1371,26 @@ on_keyboard_delete_clicked(GtkButton * button, gpointer user_data)
             XKEYBOARD * keyboard;
             gchar *type;
             bool user;
-            String icon_file;
-            
             gtk_tree_model_get(model, &iter, 
                                TABLE_COLUMN_KEYBOARD, &keyboard,
                                TABLE_COLUMN_TYPE, &type,             
                                TABLE_COLUMN_IS_USER, &user,-1);
-
-            icon_file=get_existing_icon_file(get_icon_name(keyboard), user);
-            
-            if (icon_file.length() != 0)
-                unlink(icon_file.c_str());
+            fprintf(stderr, "DAR got keyboard info\n");
+            unlink(get_icon_file(get_icon_name(keyboard), user).c_str());
             restart_scim();
         }
 
 	delete_keyboard_from_list(model, &iter);
+    }
+}
+
+static void
+on_toggle_button_toggled(GtkToggleButton * button, gpointer user_data)
+{
+    if (gtk_toggle_button_get_active(button)) {
+	gtk_button_set_label(GTK_BUTTON(button), _("True"));
+    } else {
+	gtk_button_set_label(GTK_BUTTON(button), _("False"));
     }
 }
 
@@ -1426,9 +1411,10 @@ run_keyboard_properties_dialog(XKEYBOARD * keyboard,
     GtkWidget *entry_name;
     GtkWidget *entry_author;
     GtkWidget *entry_icon;
+    GtkWidget *button_icon;
     GtkWidget *entry_locales;
-    GtkWidget *entry_copyright;
-    GtkWidget *entry_message;
+    GtkWidget *entry_status_prompt;
+    GtkWidget *cancelbutton;
     GtkWidget *okbutton;
 
     gint result = GTK_RESPONSE_CANCEL;
@@ -1470,12 +1456,11 @@ run_keyboard_properties_dialog(XKEYBOARD * keyboard,
 			 (GtkAttachOptions) (0), 0, 0);
 	gtk_misc_set_alignment(GTK_MISC(label), 1, 0.5);
 
-	entry_name = gtk_label_new(data.name.c_str());
+	entry_name = gtk_entry_new();
 	gtk_widget_show(entry_name);
 	gtk_table_attach(GTK_TABLE(table), entry_name, 1, 2, 0, 1,
 			 (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
 			 (GtkAttachOptions) (0), 0, 0);
-	gtk_misc_set_alignment(GTK_MISC(entry_name), 0, 0.5);
 
 	label = gtk_label_new(_("Author:"));
 	gtk_widget_show(label);
@@ -1484,42 +1469,11 @@ run_keyboard_properties_dialog(XKEYBOARD * keyboard,
 			 (GtkAttachOptions) (0), 0, 0);
 	gtk_misc_set_alignment(GTK_MISC(label), 1, 0.5);
 
-	entry_author = gtk_label_new(data.author.c_str());
+	entry_author = gtk_entry_new();
 	gtk_widget_show(entry_author);
 	gtk_table_attach(GTK_TABLE(table), entry_author, 1, 2, 1, 2,
 			 (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
 			 (GtkAttachOptions) (0), 0, 0);
-	gtk_misc_set_alignment(GTK_MISC(entry_author), 0, 0.5);
-
-	label = gtk_label_new(_("Copyright:"));
-	gtk_widget_show(label);
-	gtk_table_attach(GTK_TABLE(table), label, 0, 1, 6, 7,
-			 (GtkAttachOptions) (GTK_FILL),
-			 (GtkAttachOptions) (0), 0, 0);
-	gtk_misc_set_alignment(GTK_MISC(label), 1, 0.5);
-
-	entry_copyright = gtk_label_new(data.copyright.c_str());
-	gtk_widget_show(entry_copyright);
-	gtk_table_attach(GTK_TABLE(table), entry_copyright, 1,
-			 2, 6, 7,
-			 (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
-			 (GtkAttachOptions) (0), 0, 0);
-	gtk_misc_set_alignment(GTK_MISC(entry_copyright), 0, 0.5);
-
-	label = gtk_label_new(_("Message:"));
-	gtk_widget_show(label);
-	gtk_table_attach(GTK_TABLE(table), label, 0, 1, 7, 8,
-			 (GtkAttachOptions) (GTK_FILL),
-			 (GtkAttachOptions) (0), 0, 0);
-	gtk_misc_set_alignment(GTK_MISC(label), 1, 0.5);
-
-	entry_message = gtk_label_new(data.message.c_str());
-	gtk_widget_show(entry_message);
-	gtk_table_attach(GTK_TABLE(table), entry_message, 1,
-			 2, 7, 8,
-			 (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
-			 (GtkAttachOptions) (0), 0, 0);
-	gtk_misc_set_alignment(GTK_MISC(entry_message), 0, 0.5);
 
 	label = gtk_label_new(_("Icon File:"));
 	gtk_widget_show(label);
@@ -1534,30 +1488,57 @@ run_keyboard_properties_dialog(XKEYBOARD * keyboard,
 			 (GtkAttachOptions) (GTK_FILL),
 			 (GtkAttachOptions) (GTK_FILL), 0, 0);
 
-	entry_icon = gtk_label_new(data.icon.c_str());
+	entry_icon = gtk_entry_new();
 	gtk_widget_show(entry_icon);
 	gtk_box_pack_start(GTK_BOX(hbox), entry_icon, TRUE, TRUE, 0);
-	gtk_misc_set_alignment(GTK_MISC(entry_icon), 0, 0.5);
 
-	label = gtk_label_new(_("Language:"));
+	button_icon = gtk_button_new_with_mnemonic(_("Browse"));
+	gtk_widget_show(button_icon);
+	gtk_box_pack_start(GTK_BOX(hbox), button_icon, FALSE, FALSE, 0);
+
+	g_signal_connect(G_OBJECT(button_icon), "clicked",
+			 G_CALLBACK(on_icon_file_selection_clicked),
+			 entry_icon);
+
+	label = gtk_label_new(_("Supported Locales:"));
 	gtk_widget_show(label);
 	gtk_table_attach(GTK_TABLE(table), label, 0, 1, 5, 6,
 			 (GtkAttachOptions) (GTK_FILL),
 			 (GtkAttachOptions) (0), 0, 0);
 	gtk_misc_set_alignment(GTK_MISC(label), 1, 0.5);
 
-	entry_locales = gtk_label_new(data.locales.c_str());
+	entry_locales = gtk_entry_new();
 	gtk_widget_show(entry_locales);
 	gtk_table_attach(GTK_TABLE(table), entry_locales, 1, 2, 5,
 			 6,
 			 (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
 			 (GtkAttachOptions) (0), 0, 0);
-	gtk_misc_set_alignment(GTK_MISC(entry_locales), 0, 0.5);
+
+	label = gtk_label_new(_("Status Prompt:"));
+	gtk_widget_show(label);
+	gtk_table_attach(GTK_TABLE(table), label, 0, 1, 6, 7,
+			 (GtkAttachOptions) (GTK_FILL),
+			 (GtkAttachOptions) (0), 0, 0);
+	gtk_misc_set_alignment(GTK_MISC(label), 1, 0.5);
+
+	entry_status_prompt = gtk_entry_new();
+	gtk_widget_show(entry_status_prompt);
+	gtk_table_attach(GTK_TABLE(table), entry_status_prompt, 1,
+			 2, 6, 7,
+			 (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
+			 (GtkAttachOptions) (0), 0, 0);
+
 
 	dialog_action_area = GTK_DIALOG(dialog)->action_area;
 	gtk_widget_show(dialog_action_area);
 	gtk_button_box_set_layout(GTK_BUTTON_BOX
 				  (dialog_action_area), GTK_BUTTONBOX_END);
+
+	cancelbutton = gtk_button_new_from_stock("gtk-cancel");
+	gtk_widget_show(cancelbutton);
+	gtk_dialog_add_action_widget(GTK_DIALOG(dialog),
+				     cancelbutton, GTK_RESPONSE_CANCEL);
+	GTK_WIDGET_SET_FLAGS(cancelbutton, GTK_CAN_DEFAULT);
 
 	okbutton = gtk_button_new_from_stock("gtk-ok");
 	gtk_widget_show(okbutton);
@@ -1566,17 +1547,86 @@ run_keyboard_properties_dialog(XKEYBOARD * keyboard,
 	GTK_WIDGET_SET_FLAGS(okbutton, GTK_CAN_DEFAULT);
     }
 
+    {				// Set initial data and the widgets
+	// status.
+
+	gtk_entry_set_editable(GTK_ENTRY(entry_name), FALSE);
+	gtk_entry_set_editable(GTK_ENTRY(entry_author), FALSE);
+	gtk_entry_set_editable(GTK_ENTRY(entry_icon), FALSE);
+
+	if (!editable) {
+	    gtk_entry_set_editable(GTK_ENTRY(entry_status_prompt), FALSE);
+	    gtk_entry_set_editable(GTK_ENTRY(entry_locales), FALSE);
+	    gtk_widget_set_sensitive(button_icon, FALSE);
+	}
+
+	gtk_entry_set_text(GTK_ENTRY(entry_name), data.name.c_str());
+	gtk_entry_set_text(GTK_ENTRY(entry_author), data.author.c_str());
+	gtk_entry_set_text(GTK_ENTRY(entry_icon), data.icon.c_str());
+	gtk_entry_set_text(GTK_ENTRY(entry_locales), data.locales.c_str());
+	gtk_entry_set_text(GTK_ENTRY(entry_status_prompt),
+			   data.status_prompt.c_str());
+    }
 
     {				// Run the dialog and return the result;
 	gtk_window_set_default_size(GTK_WINDOW(dialog), 560, 400);
 
-    gtk_dialog_run(GTK_DIALOG(dialog));
+	while (1) {
+	    result = gtk_dialog_run(GTK_DIALOG(dialog));
 
+	    if (result != GTK_RESPONSE_OK)
+		break;
+
+	    data.icon = String(gtk_entry_get_text(GTK_ENTRY(entry_icon)));
+	    data.locales =
+		String(gtk_entry_get_text(GTK_ENTRY(entry_locales)));
+	    data.status_prompt =
+		String(gtk_entry_get_text(GTK_ENTRY(entry_status_prompt)));
+
+	    if (validate_keyboard_properties_data(keyboard, data))
+		break;
+	}
 
 	gtk_widget_destroy(dialog);
     }
 
     return result;
+}
+
+static bool
+validate_keyboard_properties_data(const XKEYBOARD * keyboard,
+				  const KeyboardPropertiesData & data)
+{
+    bool ok = true;
+    String err;
+
+    if (ok && !data.icon.length()
+	&& access(data.icon.c_str(), R_OK) != 0) {
+	ok = false;
+	err = _("Invalid icon file.");
+    }
+
+    if (ok && !data.locales.length()) {
+	ok = false;
+	err = _("Invalid locales.");
+    }
+
+    if (ok && !data.status_prompt.length()) {
+	ok = false;
+	err = _("Invalid status prompt.");
+    }
+
+    if (!ok) {
+	GtkWidget *msg = gtk_message_dialog_new(0,
+						GTK_DIALOG_MODAL,
+						GTK_MESSAGE_ERROR,
+						GTK_BUTTONS_CLOSE,
+						err.c_str());
+	gtk_dialog_run(GTK_DIALOG(msg));
+	gtk_widget_destroy(msg);
+    }
+
+    return ok;
 }
 
 static void
@@ -1608,16 +1658,10 @@ on_keyboard_properties_clicked(GtkButton * button, gpointer user_data)
 	gint result;
 
 	data.name = keyboard->name;
-	data.author = get_static_store(keyboard, SS_AUTHOR);	
-	if (data.author.length() == 0)
-	    data.author = String("None specified");
-	
-	data.locales = get_static_store(keyboard, SS_LANGUAGE);
-	if (data.locales.length() == 0)
-	    data.locales = String("None specified");
-	data.icon = get_existing_icon_file(get_icon_name(keyboard), user);
-	data.copyright = get_static_store(keyboard, SS_COPYRIGHT);
-	data.message = get_static_store(keyboard, SS_MESSAGE);
+	data.author = "";	// FIX LATER
+	data.locales = "";
+	data.icon = get_icon_file(get_icon_name(keyboard), user);
+	data.status_prompt = "";
 
 	olddata = data;
 
@@ -1626,6 +1670,34 @@ on_keyboard_properties_clicked(GtkButton * button, gpointer user_data)
 
 	g_free(file);
 
+	// Save the changes.
+	if (result == GTK_RESPONSE_OK) {
+
+	    if (data.icon != olddata.icon) {
+		GdkPixbuf *pixbuf =
+		    gdk_pixbuf_new_from_file(data.icon.c_str(),
+					     NULL);
+		scale_pixbuf(&pixbuf, LIST_ICON_SIZE, LIST_ICON_SIZE);
+
+		gtk_list_store_set(GTK_LIST_STORE(model),
+				   &iter, TABLE_COLUMN_ICON, pixbuf, -1);
+
+		if (pixbuf)
+		    g_object_unref(pixbuf);
+
+		/*
+		 * lib->set_icon_file (data.icon); 
+		 */
+	    }
+	    /*
+	     * if (data.locales != olddata.locales) lib->set_locales
+	     * (data.locales);
+	     * 
+	     * if (data.status_prompt != olddata.status_prompt)
+	     * lib->set_status_prompt (utf8_mbstowcs
+	     * (data.status_prompt)); 
+	     */
+	}
     }
 }
 

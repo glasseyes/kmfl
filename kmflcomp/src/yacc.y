@@ -76,7 +76,6 @@ GROUP *gp = NULL;			/* Temporary group pointer */
 %token <simple> TOK_MNEMONIC
 %token <simple> TOK_NOMATCH
 %token <simple> TOK_NAME
-%token <simple> TOK_NOTANY
 %token <simple> TOK_NUL
 %token <number> TOK_NUMBER
 %token <simple> TOK_NL
@@ -95,7 +94,6 @@ GROUP *gp = NULL;			/* Temporary group pointer */
 %token <simple> TOK_USINGKEYS
 %token <number> TOK_UTF
 %token <simple> TOK_VERSION
-%token <number> TOK_XKEYSYM
 
 %%
 T_FILE :
@@ -189,15 +187,15 @@ T_HEADLINE :
 	}
 	| TOK_ANSI TOK_GT TOK_USE T_PARAMETER TOK_NL
 	{
-		set_start_group($4,KF_ANSI, lineno);
+		set_start_group($4,KF_ANSI);
 	}
 	| TOK_UNICODE TOK_GT TOK_USE T_PARAMETER TOK_NL
 	{
-		set_start_group($4,KF_UNICODE, lineno);
+		set_start_group($4,KF_UNICODE);
 	}
 	| TOK_ANSI TOK_GT TOK_USE T_PARAMETER TOK_USE T_PARAMETER TOK_NL
 	{
-		kmflcomp_error(lineno,"alternate starting groups not supported");
+		error(lineno,"alternate starting groups not supported");
 		fail(11,"obsolete syntax");
 	}
 	| TOK_AUTHOR T_STRING TOK_NL
@@ -233,7 +231,7 @@ T_GROUP :
 		$$ = $1;
 		($$)->rules = NULL;
 		($$)->nrules = 0;
-		kmflcomp_warn(0,"group(%s) is empty!",($1)->name);
+		warn(0,"group(%s) is empty!",($1)->name);
 	}
     | T_GHEADER T_RULES 
 	{
@@ -241,20 +239,20 @@ T_GROUP :
 		($$)->rules = $2;
 		($$)->nrules = count_rules($2);
 		if(($$)->nrules == 0) 
-			kmflcomp_warn(0,"group(%s) is empty!",($1)->name); 
+			warn(0,"group(%s) is empty!",($1)->name); 
 	}
 	;
 
 T_GHEADER :
 	TOK_GROUP T_PARAMETER TOK_NL
 	{
-		$$ = gp = new_group($2, lineno);
+		$$ = gp = new_group($2);
 		if(gp) gp->flags = 0;
 	}
 	|
 	TOK_GROUP T_PARAMETER TOK_USINGKEYS TOK_NL
 	{
-		$$ = gp = new_group($2, lineno);
+		$$ = gp = new_group($2);
 		if(gp) gp->flags = GF_USEKEYS;
 	}
 	;
@@ -319,43 +317,31 @@ T_ITEM :
 	}
 	| TOK_ANY T_PARAMETER 
 	{
-		if((n=store_number($2,lineno)) != UNDEFINED)
+		if((n=store_number($2)) != UNDEFINED)
 		{
 			$$ = MAKE_ITEM(ITEM_ANY,n);
 		}
 		else
 		{
-			kmflcomp_warn(lineno,"store (%s) is undefined!",$2);
-			$$ = 0;
-		}
-	}
-	| TOK_NOTANY T_PARAMETER 
-	{
-		if((n=store_number($2,lineno)) != UNDEFINED)
-		{
-			$$ = MAKE_ITEM(ITEM_NOTANY,n);
-		}
-		else
-		{
-			kmflcomp_warn(lineno,"store (%s) is undefined!",$2);
+			warn(lineno,"store (%s) is undefined!",$2);
 			$$ = 0;
 		}
 	}
 	| TOK_OUTS T_PARAMETER 
 	{
-		if((n=store_number($2,lineno)) != UNDEFINED)
+		if((n=store_number($2)) != UNDEFINED)
 		{
 			$$ = MAKE_ITEM(ITEM_OUTS,n);
 		}
 		else
 		{
-			kmflcomp_warn(lineno,"store (%s) is undefined!",$2);
+			warn(lineno,"store (%s) is undefined!",$2);
 			$$ = 0;
 		}
 	}
 	| TOK_DEADKEY T_PARAMETER 
 	{
-		$$ = MAKE_ITEM(ITEM_DEADKEY,deadkey_number($2, lineno));
+		$$ = MAKE_ITEM(ITEM_DEADKEY,deadkey_number($2));
 	}
 	| TOK_NUL
 	{
@@ -363,19 +349,19 @@ T_ITEM :
 	}
 	| TOK_INDEX TOK_BRKT T_BYTES TOK_COMMA T_BYTES TOK_BRKT
 	{
-		if((n=store_number($3,lineno)) != UNDEFINED)
+		if((n=store_number($3)) != UNDEFINED)
 		{
 			$$ = MAKE_PARAMETER_ITEM(ITEM_INDEX,atoi($5),n);
 		}
 		else
 		{
-			kmflcomp_warn(lineno,"store (%s) is undefined!",$3);
+			warn(lineno,"store (%s) is undefined!",$3);
 			$$ = 0;
 		}
 	}
 	| TOK_INDEX TOK_BRKT T_BYTES TOK_BRKT
 	{
-		kmflcomp_warn(lineno,"index(%s) must have TWO parameters!",$3);
+		warn(lineno,"index(%s) must have TWO parameters!",$3);
 		$$ = 0;
 	}
 	| TOK_RTN
@@ -396,7 +382,7 @@ T_ITEM :
 	}
 	| TOK_USE T_PARAMETER 
 	{
-		$$ = MAKE_ITEM(ITEM_USE,group_number($2, lineno));
+		$$ = MAKE_ITEM(ITEM_USE,group_number($2));
 	}
 	| TOK_MATCH
 	{
@@ -408,12 +394,12 @@ T_ITEM :
 	}
 	| TOK_CALL T_PARAMETER
 	{
-		kmflcomp_error(lineno,"call keyword not implemented");
+		error(lineno,"call keyword not implemented");
 		fail(12,"unsupported keyword");
 	}
 	| TOK_SWITCH T_PARAMETER
 	{
-		kmflcomp_error(lineno,"switch keyword not implemented");
+		error(lineno,"switch keyword not implemented");
 		fail(11,"obsolete syntax");
 	}
 	| TOK_DOLLAR T_BYTES
@@ -427,12 +413,12 @@ T_ITEM :
 		else
 		{
 			$$ = 0;
-			kmflcomp_error(lineno,"undefined constant");
+			error(lineno,"undefined constant");
 		}
 	}
 	| TOK_ERROR
 	{
-		kmflcomp_error(lineno,"illegal or unrecognized item in rule or store");
+		error(lineno,"illegal or unrecognized item in rule or store");
 	}
 	;
 
@@ -444,7 +430,7 @@ T_STRING :
 	|
 	TOK_QM TOK_QM
 	{
-		$$ = new_string(0); /* allow for empty strings */
+		$$ = new_string(0);	/* allow for empty strings */
 	}
 	;
 
@@ -458,29 +444,21 @@ T_PARAMETER:
 T_KEYDEF : 
 	T_STRING 
 	{	
-		$$ = make_keysym(lineno, 0,string_to_keysym($1,lineno));
+		$$ = make_keysym(0,string_to_keysym($1,lineno));
 	}
 	|
 	T_KEYMODS T_STRING 
 	{	
-		$$ = make_keysym(lineno, 0,string_to_keysym($2,lineno));
+		$$ = make_keysym(0,string_to_keysym($2,lineno));
 	}
 	|
 	T_KEYMODS TOK_RAWKEY 
 	{
-		$$ = make_keysym(lineno, $1,$2);
+		$$ = make_keysym($1,$2);
 	}
 	| TOK_RAWKEY 
 	{
-		$$ = make_keysym(lineno, 0,$1);
-	}
-	| T_KEYMODS TOK_XKEYSYM
-	{
-		$$ = make_xkeysym(lineno, $1, $2);
-	}
-	| TOK_XKEYSYM
-	{
-		$$ = make_xkeysym(lineno, 0, $1);
+		$$ = make_keysym(0,$1);
 	}
 	;
 

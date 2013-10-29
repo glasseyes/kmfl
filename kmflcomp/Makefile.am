@@ -3,7 +3,7 @@
 ## If you don't want it to overwrite it,
 ## 	Please disable it in the Anjuta project configuration
 
-SUBDIRS = include src kmfl_compiler
+SUBDIRS = src
 
 kmflcompdocdir = ${prefix}/doc/kmflcomp
 kmflcompdoc_DATA = \

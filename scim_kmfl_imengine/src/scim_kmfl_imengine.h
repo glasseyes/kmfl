@@ -5,22 +5,23 @@
 /*
  * KMFL Input Method for SCIM (Smart Common Input Method)
  *
- * Copyright (C) 2005 SIL International
- * based on source from SCIM Copyright (c) 2004 James Su <suzhe@tsinghua.org.cn>
+ * Copyright (c) 2004 Doug Rintoul <doug_rintoul@sil.org>
+ *
  *
  * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
+ * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * version 2 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this program; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place, Suite 330,
+ * Boston, MA  02111-1307  USA
  *
  */
 
@@ -64,9 +65,7 @@ private:
     int m_keyboard_number; 	
     String m_keyboard_file;				
     String uuid;
-    String m_Language;
-    String m_Author;
-    String m_Copyright;
+    String get_header(int hdrID) const;
 
 };
 
@@ -112,8 +111,6 @@ public:
     virtual void toggle_input_status ();
     void output_string(const String&str);
     void erase_char ();
-    void forward_keyevent(unsigned int key, unsigned int state);
-    void output_beep ();
 
 private:
     int create_lookup_table (int start = 0);

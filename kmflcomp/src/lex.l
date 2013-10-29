@@ -11,26 +11,16 @@
 
 void yyerror(char *);
 
-#if defined(FLEX_SCANNER) && ! defined(INITIAL)
-int caller=0,caller0=0;
-#else
-int caller= INITIAL,caller0=INITIAL;
-#endif
-
+int caller=INITIAL,caller0=INITIAL;
 char qchar;
 extern int lineno;
 extern int errcount;
 int done=0;
 
-void yycleanup(void)
-{
-    yy_delete_buffer(YY_CURRENT_BUFFER);
-}
-
 int yyterminate(void)
 {
 	yyerror("END\n");
-	fflush(stderr); 
+	fflush(stderr);
 	return YY_NULL;
 }
 
@@ -84,7 +74,6 @@ using{SPACES}+keys		{return TOK_USINGKEYS;}
 use 					{return TOK_USE;}
 context					{return TOK_CONTEXT;}
 any 					{return TOK_ANY;}
-notany 					{return TOK_NOTANY;}
 beep					{return TOK_BEEP;}
 index 					{BEGIN(PLIST);return TOK_INDEX;}
 nomatch					{return TOK_NOMATCH;}
@@ -302,8 +291,8 @@ switch					{return TOK_SWITCH;/*  (obsolete) */}
 	K_DEL		{yylval.number=0xffff;return(TOK_RAWKEY);}
 	K_oE2		{yylval.number=0x3c;return(TOK_RAWKEY); /* on German kbds only!*/}
 
-	XK_[a-zA-Z0-9]+ {yylval.number=text_to_keysym(yytext); if (yylval.number == -1) yyerror("unrecognised raw key"); else return(TOK_XKEYSYM);}
-	K_[A-Z0-9]+	{ yyerror("unrecognised raw key");} 
+	K_[A-Z0-9]+	{ yyerror("unrecognised raw key");}
+
 	\'			{caller0=caller;caller=KEYNAME;qchar='\'';BEGIN(QUOTE);return(TOK_QM);}
 	\"			{caller0=caller;caller=KEYNAME;qchar='\"';BEGIN(QUOTE);return(TOK_QM);}
 
@@ -327,9 +316,8 @@ switch					{return TOK_SWITCH;/*  (obsolete) */}
 
 ^[ ]*c{SPACES}	{BEGIN(SKIP);}
 
-^$keyman:?		{/* Keyman platform conditional - just drop marker */}
-^$kmfl:?		{/* Kmfl platform conditional - just drop marker */}
-^$[a-zA-Z0-9]*:?	{BEGIN(SKIP);} /* Platform Conditional */
+^$weaver:?		{BEGIN(SKIP); /*Mac compatibility line: must treat entire line as a comment*/}
+^$keyman:?		{/* Keyman/Mac compatibility - just drop marker */}
 
 <SKIP>{
 	.			{/* ignore everything until nl or EOF */}
